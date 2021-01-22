@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"os"
 	"reflect"
 )
@@ -16,6 +17,7 @@ type UI interface {
 	SetBounds(Bounds) error
 	Bind(name string, f interface{}) error
 	Eval(js string) Value
+	EvalRaw(js string) (TargetMessage, error)
 	Done() <-chan struct{}
 	Close() error
 }
@@ -167,10 +169,27 @@ func (u *ui) Eval(js string) Value {
 	return value{err: err, raw: v}
 }
 
+func (u *ui) EvalRaw(js string) (TargetMessage, error) {
+	return u.chrome.evalRaw(js)
+}
+
 func (u *ui) SetBounds(b Bounds) error {
 	return u.chrome.setBounds(b)
 }
 
 func (u *ui) Bounds() (Bounds, error) {
 	return u.chrome.bounds()
+}
+
+func GetFilePath(u UI, objectId string) (string, error) {
+	ui := u.(*ui)
+	msg, err := ui.chrome.send("DOM.getFileInfo", h{"objectId": objectId})
+	if err != nil {
+		return "", err
+	}
+	var res struct{ Path string }
+	log.Println("msg", string(msg))
+	log.Printf("%#v", string(msg))
+	err = json.Unmarshal(msg, &res)
+	return res.Path, err
 }

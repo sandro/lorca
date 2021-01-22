@@ -43,7 +43,7 @@ type chrome struct {
 	target   string
 	session  string
 	window   int
-	pending  map[int]chan result
+	pending  map[int]chan TargetMessage
 	bindings map[string]bindingFunc
 }
 
@@ -51,7 +51,7 @@ func newChromeWithArgs(chromeBinary string, args ...string) (*chrome, error) {
 	// The first two IDs are used internally during the initialization
 	c := &chrome{
 		id:       2,
-		pending:  map[int]chan result{},
+		pending:  map[int]chan TargetMessage{},
 		bindings: map[string]bindingFunc{},
 	}
 
@@ -232,22 +232,25 @@ type targetMessageTemplate struct {
 	Result json.RawMessage `json:"result"`
 }
 
-type targetMessage struct {
-	targetMessageTemplate
+type SendResult struct {
 	Result struct {
-		Result struct {
-			Type        string          `json:"type"`
-			Subtype     string          `json:"subtype"`
-			Description string          `json:"description"`
-			Value       json.RawMessage `json:"value"`
-			ObjectID    string          `json:"objectId"`
-		} `json:"result"`
-		Exception struct {
-			Exception struct {
-				Value json.RawMessage `json:"value"`
-			} `json:"exception"`
-		} `json:"exceptionDetails"`
+		Type        string          `json:"type"`
+		Subtype     string          `json:"subtype"`
+		Description string          `json:"description"`
+		Value       json.RawMessage `json:"value"`
+		ObjectID    string          `json:"objectId"`
 	} `json:"result"`
+	Exception struct {
+		Exception struct {
+			Value json.RawMessage `json:"value"`
+		} `json:"exception"`
+	} `json:"exceptionDetails"`
+}
+
+type TargetMessage struct {
+	targetMessageTemplate
+	Result  SendResult `json:"result"`
+	Message string
 }
 
 func (c *chrome) readLoop() {
@@ -266,8 +269,9 @@ func (c *chrome) readLoop() {
 			if params.SessionID != c.session {
 				continue
 			}
-			res := targetMessage{}
+			res := TargetMessage{}
 			json.Unmarshal([]byte(params.Message), &res)
+			res.Message = params.Message
 
 			if res.ID == 0 && res.Method == "Runtime.consoleAPICalled" || res.Method == "Runtime.exceptionThrown" {
 				log.Println(params.Message)
@@ -316,20 +320,8 @@ func (c *chrome) readLoop() {
 			if !ok {
 				continue
 			}
+			resc <- res
 
-			if res.Error.Message != "" {
-				resc <- result{Err: errors.New(res.Error.Message)}
-			} else if res.Result.Exception.Exception.Value != nil {
-				resc <- result{Err: errors.New(string(res.Result.Exception.Exception.Value))}
-			} else if res.Result.Result.Type == "object" && res.Result.Result.Subtype == "error" {
-				resc <- result{Err: errors.New(res.Result.Result.Description)}
-			} else if res.Result.Result.Type != "" {
-				resc <- result{Value: res.Result.Result.Value}
-			} else {
-				res := targetMessageTemplate{}
-				json.Unmarshal([]byte(params.Message), &res)
-				resc <- result{Value: res.Result}
-			}
 		} else if m.Method == "Target.targetDestroyed" {
 			params := struct {
 				TargetID string `json:"targetId"`
@@ -343,13 +335,29 @@ func (c *chrome) readLoop() {
 	}
 }
 
+func handleError(res TargetMessage) (json.RawMessage, error) {
+	if res.Error.Message != "" {
+		return nil, errors.New(res.Error.Message)
+	} else if res.Result.Exception.Exception.Value != nil {
+		return nil, errors.New(string(res.Result.Exception.Exception.Value))
+	} else if res.Result.Result.Type == "object" && res.Result.Result.Subtype == "error" {
+		return nil, errors.New(res.Result.Result.Description)
+	} else if res.Result.Result.Type != "" {
+		return res.Result.Result.Value, nil
+	} else {
+		res2 := targetMessageTemplate{}
+		json.Unmarshal([]byte(res.Message), &res2)
+		return res2.Result, nil
+	}
+}
+
 func (c *chrome) send(method string, params h) (json.RawMessage, error) {
 	id := atomic.AddInt32(&c.id, 1)
 	b, err := json.Marshal(h{"id": int(id), "method": method, "params": params})
 	if err != nil {
 		return nil, err
 	}
-	resc := make(chan result)
+	resc := make(chan TargetMessage)
 	c.Lock()
 	c.pending[int(id)] = resc
 	c.Unlock()
@@ -362,12 +370,39 @@ func (c *chrome) send(method string, params h) (json.RawMessage, error) {
 		return nil, err
 	}
 	res := <-resc
-	return res.Value, res.Err
+	return handleError(res)
+}
+
+func (c *chrome) sendRaw(method string, params h) (TargetMessage, error) {
+	id := atomic.AddInt32(&c.id, 1)
+	b, err := json.Marshal(h{"id": int(id), "method": method, "params": params})
+	if err != nil {
+		return TargetMessage{}, err
+	}
+	resc := make(chan TargetMessage)
+	c.Lock()
+	c.pending[int(id)] = resc
+	c.Unlock()
+
+	if err := websocket.JSON.Send(c.ws, h{
+		"id":     int(id),
+		"method": "Target.sendMessageToTarget",
+		"params": h{"message": string(b), "sessionId": c.session},
+	}); err != nil {
+		return TargetMessage{}, err
+	}
+	res := <-resc
+	_, err = handleError(res)
+	return res, err
 }
 
 func (c *chrome) load(url string) error {
 	_, err := c.send("Page.navigate", h{"url": url})
 	return err
+}
+
+func (c *chrome) evalRaw(expr string) (TargetMessage, error) {
+	return c.sendRaw("Runtime.evaluate", h{"expression": expr, "awaitPromise": true})
 }
 
 func (c *chrome) eval(expr string) (json.RawMessage, error) {
