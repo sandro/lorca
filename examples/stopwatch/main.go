@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/zserge/lorca"
+	"github.com/sandro/lorca"
 )
 
 func main() {
