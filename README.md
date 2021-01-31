@@ -1,6 +1,6 @@
 # Lorca
 
-## Sandro Fork
+## Why the Sandro Fork?
 
 This fork was created to provide access to the absolute path of uploaded files by evaluating a provided [FileList](https://developer.mozilla.org/en-US/docs/Web/API/FileList).
 
