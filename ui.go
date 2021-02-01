@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"os"
 	"reflect"
 )
@@ -188,8 +187,6 @@ func GetFilePath(u UI, objectId string) (string, error) {
 		return "", err
 	}
 	var res struct{ Path string }
-	log.Println("msg", string(msg))
-	log.Printf("%#v", string(msg))
 	err = json.Unmarshal(msg, &res)
 	return res.Path, err
 }
